@@ -51,69 +51,75 @@ void setup() {
 void loop() {
   Packet pkt;
 
-  // ----- Joysticks -----
-  pkt.steer = map(analogRead(STEER_PIN), 0, 1023, 0, 255);
-  pkt.throttle = map(analogRead(THROTTLE_PIN), 0, 1023, 0, 255);
+  // ----- RAW ANALOG READS -----
+  int rawSteer = analogRead(STEER_PIN);
+  int rawThrottle = analogRead(THROTTLE_PIN);
 
-  // ----- Read raw switches -----
+  // ----- DEBUG RAW VALUES -----
+  Serial.print("RAW_steer=");
+  Serial.print(rawSteer);
+  Serial.print("  RAW_throttle=");
+  Serial.print(rawThrottle);
+
+  // ----- NORMALIZED 0–255 RANGE -----
+  // Constrain to typical joystick range (we will adjust once we see raw values)
+  int steerC = constrain(rawSteer, 200, 800);
+  int throttleC = constrain(rawThrottle, 200, 800);
+
+  pkt.steer = map(steerC, 200, 800, 0, 255);
+  pkt.throttle = map(throttleC, 200, 800, 0, 255);
+
+  // ----- DEBUG MAPPED VALUES -----
+  Serial.print("  MappedSteer=");
+  Serial.print(pkt.steer);
+  Serial.print("  MappedThrottle=");
+  Serial.print(pkt.throttle);
+
+  // ----- SWITCHES -----
   bool readingSW1 = digitalRead(SW1_PIN);
   bool readingSW2 = digitalRead(SW2_PIN);
 
   pkt.sw1 = 0;
   pkt.sw2 = 0;
 
-  // ----- Debounce SW1 -----
+  // Debounce SW1
   if (readingSW1 != lastReadingSW1) {
     lastDebounceSW1 = millis();
   }
-
   if ((millis() - lastDebounceSW1) > debounceDelay) {
     if (readingSW1 != stableSW1) {
       stableSW1 = readingSW1;
-
-      if (stableSW1 == LOW) {
-        pkt.sw1 = 1;  // toggle event
-      }
+      if (stableSW1 == LOW) pkt.sw1 = 1;
     }
   }
-
   lastReadingSW1 = readingSW1;
 
-  // ----- Debounce SW2 -----
+  // Debounce SW2
   if (readingSW2 != lastReadingSW2) {
     lastDebounceSW2 = millis();
   }
-
   if ((millis() - lastDebounceSW2) > debounceDelay) {
     if (readingSW2 != stableSW2) {
       stableSW2 = readingSW2;
-
-      if (stableSW2 == LOW) {
-        pkt.sw2 = 1;  // toggle event
-      }
+      if (stableSW2 == LOW) pkt.sw2 = 1;
     }
   }
-
   lastReadingSW2 = readingSW2;
 
-  // ----- Heartbeat -----
+  // Heartbeat
   pkt.heartbeat = hb++;
 
-  // ----- Send -----
+  // Send
   bool ok = radio.write(&pkt, sizeof(pkt));
 
-  // ----- Debug -----
-  Serial.print("Steer=");
-  Serial.print(pkt.steer);
-  Serial.print(" Thr=");
-  Serial.print(pkt.throttle);
-  Serial.print(" SW1_evt=");
+  // ----- FINAL DEBUG LINE -----
+  Serial.print("  SW1_evt=");
   Serial.print(pkt.sw1);
-  Serial.print(" SW2_evt=");
+  Serial.print("  SW2_evt=");
   Serial.print(pkt.sw2);
-  Serial.print(" HB=");
+  Serial.print("  HB=");
   Serial.print(pkt.heartbeat);
-  Serial.println(ok ? " SENT" : " FAIL");
+  Serial.println(ok ? "  SENT" : "  FAIL");
 
   delay(50);
 }

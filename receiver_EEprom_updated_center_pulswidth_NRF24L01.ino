@@ -87,138 +87,135 @@ void setup() {
 void loop() {
   Packet pkt;
 
+  // ---------------- RADIO PACKET HANDLING ----------------
   if (radio.available()) {
     radio.read(&pkt, sizeof(pkt));
 
-    // ---------------- CORRUPTED PACKET FAILSAFE ----------------
+    // Corrupted/duplicate packet protection
     static uint16_t lastGoodHB = 0;
 
     if (pkt.heartbeat == 0 || pkt.heartbeat == lastGoodHB) {
-      // Bad or duplicate packet — ignore it
-      return;
-    }
+      // Ignore bad packet but DO NOT return
+    } else {
+      lastGoodHB = pkt.heartbeat;
+      lastHB = millis();
 
-    lastGoodHB = pkt.heartbeat;
-    lastHB = millis();
-    // -----------------------------------------------------------
-
-    if (firstPacket) {
-      digitalWrite(SW1_OUT, LOW);
-      digitalWrite(SW2_A, LOW);
-      digitalWrite(SW2_B, LOW);
-      sw1State = false;
-      sw2State = false;
-      firstPacket = false;
-    }
-
-    bool calibrate = (digitalRead(KILL_SWITCH) == LOW);
-
-    if (calibrate) {
-      zeroSteer = pkt.steer;
-      zeroThrottle = pkt.throttle;
-
-      EEPROM.write(0, zeroSteer);
-      EEPROM.write(1, zeroThrottle);
-
-      Serial.print("Calibrated zeroSteer = ");
-      Serial.println(zeroSteer);
-      Serial.print("Calibrated zeroThrottle = ");
-      Serial.println(zeroThrottle);
-
-      for (int i = 0; i < 5; i++) {
-        digitalWrite(SW2_A, HIGH);
+      // First packet resets outputs
+      if (firstPacket) {
+        digitalWrite(SW1_OUT, LOW);
+        digitalWrite(SW2_A, LOW);
         digitalWrite(SW2_B, LOW);
-        delay(150);
+        sw1State = false;
+        sw2State = false;
+        firstPacket = false;
+      }
+
+      // ---------------- CALIBRATION MODE ----------------
+      bool calibrate = (digitalRead(KILL_SWITCH) == LOW);
+
+      if (calibrate) {
+        zeroSteer = pkt.steer;
+        zeroThrottle = pkt.throttle;
+
+        EEPROM.write(0, zeroSteer);
+        EEPROM.write(1, zeroThrottle);
+
+        Serial.print("Calibrated zeroSteer = ");
+        Serial.println(zeroSteer);
+        Serial.print("Calibrated zeroThrottle = ");
+        Serial.println(zeroThrottle);
+
+        for (int i = 0; i < 5; i++) {
+          digitalWrite(SW2_A, HIGH);
+          digitalWrite(SW2_B, LOW);
+          delay(150);
+
+          digitalWrite(SW2_A, LOW);
+          digitalWrite(SW2_B, HIGH);
+          delay(150);
+        }
 
         digitalWrite(SW2_A, LOW);
-        digitalWrite(SW2_B, HIGH);
-        delay(150);
+        digitalWrite(SW2_B, LOW);
+
+        steering.writeMicroseconds(1400);
+        analogWrite(MOTOR_FWD, 0);
+        analogWrite(MOTOR_REV, 0);
       }
 
-      digitalWrite(SW2_A, LOW);
-      digitalWrite(SW2_B, LOW);
+      // ---------------- STEERING ----------------
+      int steer = pkt.steer;
+      int steerAdj = (int)steer - (int)zeroSteer;
 
-      steering.writeMicroseconds(1400);
-      analogWrite(MOTOR_FWD, 0);
-      analogWrite(MOTOR_REV, 0);
+      if (steerAdj > -2 && steerAdj < 2) steerAdj = 0;
 
-      return;
-    }
+      int pulseWidth = map(steerAdj, -127, 127, 1250, 1550);
+      pulseWidth = constrain(pulseWidth, 1250, 1550);
 
-    // ----- Steering -----
-    int steer = pkt.steer;
-    int steerAdj = (int)steer - (int)zeroSteer;
+      static int lastPulse = 1400;
+      if (abs(pulseWidth - lastPulse) > 3) {
+        steering.writeMicroseconds(pulseWidth);
+        lastPulse = pulseWidth;
+      }
 
-    if (steerAdj > -2 && steerAdj < 2) steerAdj = 0;
+      // ---------------- THROTTLE ----------------
+      int throttle = (int)pkt.throttle - (int)zeroThrottle;
 
-    int pulseWidth = map(steerAdj, -127, 127, 1250, 1550);
-    pulseWidth = constrain(pulseWidth, 1250, 1550);
+      if (throttle > 0) {
+        int pwm = throttle * 2;
+        pwm = constrain(pwm, 0, 255);
+        analogWrite(MOTOR_FWD, pwm);
+        analogWrite(MOTOR_REV, 0);
+      } else {
+        int pwm = (-throttle) * 2;
+        pwm = constrain(pwm, 0, 255);
+        analogWrite(MOTOR_FWD, 0);
+        analogWrite(MOTOR_REV, pwm);
+      }
 
-    static int lastPulse = 1400;
-    if (abs(pulseWidth - lastPulse) > 3) {
-      steering.writeMicroseconds(pulseWidth);
-      lastPulse = pulseWidth;
-    }
+      // ---------------- SW1 (toggle) ----------------
+      if (pkt.sw1 == 1) {
+        sw1State = !sw1State;
+        digitalWrite(SW1_OUT, sw1State);
+      }
 
-    // ----- Throttle -----
-    int throttle = (int)pkt.throttle - (int)zeroThrottle;
-
-    if (throttle > 0) {
-      int pwm = throttle * 2;
-      pwm = constrain(pwm, 0, 255);
-      analogWrite(MOTOR_FWD, pwm);
-      analogWrite(MOTOR_REV, 0);
-    } else {
-      int pwm = (-throttle) * 2;
-      pwm = constrain(pwm, 0, 255);
-      analogWrite(MOTOR_FWD, 0);
-      analogWrite(MOTOR_REV, pwm);
-    }
-
-    // ----- SW1 -----
-    if (pkt.sw1 == 1) {
-      sw1State = !sw1State;
-      digitalWrite(SW1_OUT, sw1State);
-    }
-
-    // ----- SW2 -----
-    if (pkt.sw2 == 1) {
-      sw2State = !sw2State;
-      sw2Timer = millis();
-    }
-
-    if (sw2State) {
-      if (millis() - sw2Timer > 500) {
+      // ---------------- SW2 (alternating strobe) ----------------
+      if (pkt.sw2 == 1) {
+        sw2State = !sw2State;
         sw2Timer = millis();
-        bool newState = !digitalRead(SW2_A);
-        digitalWrite(SW2_A, newState);
-        digitalWrite(SW2_B, !newState);
       }
-    } else {
-      digitalWrite(SW2_A, LOW);
-      digitalWrite(SW2_B, LOW);
+
+      if (sw2State) {
+        if (millis() - sw2Timer > 500) {
+          sw2Timer = millis();
+          bool newState = !digitalRead(SW2_A);
+          digitalWrite(SW2_A, newState);
+          digitalWrite(SW2_B, !newState);
+        }
+      } else {
+        digitalWrite(SW2_A, LOW);
+        digitalWrite(SW2_B, LOW);
+      }
+
+      // ---------------- DEBUG ----------------
+      Serial.print("SteerRaw=");
+      Serial.print(steer);
+      Serial.print(" SteerAdj=");
+      Serial.print(steerAdj);
+      Serial.print(" Pulse=");
+      Serial.print(pulseWidth);
+      Serial.print(" ThrAdj=");
+      Serial.print(throttle);
+      Serial.print(" SW1=");
+      Serial.print(sw1State);
+      Serial.print(" SW2=");
+      Serial.print(sw2State);
+      Serial.print(" HB=");
+      Serial.println(pkt.heartbeat);
     }
-
-    // ----- Debug -----
-    Serial.print("SteerRaw=");
-    Serial.print(steer);
-    Serial.print(" SteerAdj=");
-    Serial.print(steerAdj);
-    Serial.print(" Pulse=");
-    Serial.print(pulseWidth);
-    Serial.print(" ThrAdj=");
-    Serial.print(throttle);
-    Serial.print(" SW1=");
-    Serial.print(sw1State);
-    Serial.print(" SW2=");
-    Serial.print(sw2State);
-    Serial.print(" HB=");
-    Serial.println(pkt.heartbeat);
-
-    return;
   }
 
-  // ----- FAILSAFE -----
+  // ---------------- FAILSAFE ----------------
   if (millis() - lastHB > TIMEOUT) {
     analogWrite(MOTOR_FWD, 0);
     analogWrite(MOTOR_REV, 0);
